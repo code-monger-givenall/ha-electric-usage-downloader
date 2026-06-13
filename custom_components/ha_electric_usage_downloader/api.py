@@ -117,9 +117,23 @@ class ElectricUsageAPI:
         payload = await self._get_user_data()
         candidates = self._find_usage_candidates(payload)
         if not candidates:
+            accounts_payload = None
+            accounts_error = None
+            try:
+                accounts_payload = await self._get_accounts_data()
+                candidates = self._find_usage_candidates(accounts_payload)
+            except ElectricUsageAPIError as err:
+                accounts_error = str(err)
+
+        if not candidates:
             _LOGGER.warning(
-                "Could not discover SmartHub account/service location. User-data shape: %s",
+                (
+                    "Could not discover SmartHub account/service location. "
+                    "User-data shape: %s; accounts shape: %s; accounts error: %s"
+                ),
                 self._payload_shape(payload),
+                self._payload_shape(accounts_payload),
+                accounts_error,
             )
             raise ElectricUsageAPIError(
                 "Could not discover SmartHub account/service location from user data"
@@ -173,6 +187,54 @@ class ElectricUsageAPI:
             if self._customer_number:
                 param_sets.append({"userId": user_id, "customer": self._customer_number})
             param_sets.append({"userId": user_id})
+
+        if self._customer_number:
+            param_sets.append({"customer": self._customer_number})
+        param_sets.append({})
+        return param_sets
+
+    async def _get_accounts_data(self) -> Any:
+        """Fetch SmartHub account data from the account picker endpoint."""
+        last_payload: Any = None
+        for params in self._accounts_param_sets():
+            payload = await self._request_accounts_data(params)
+            last_payload = payload
+            if self._payload_has_content(payload):
+                return payload
+
+        return last_payload
+
+    async def _request_accounts_data(self, params: dict[str, str]) -> Any:
+        """Fetch SmartHub account data with one parameter set."""
+        accounts_url = f"{self.api_url}/services/secured/accounts"
+        headers = {
+            **self._base_headers(),
+            "authorization": f"Bearer {self._authorization_token}",
+            "content-type": "application/json",
+            "x-nisc-smarthub-username": self.username,
+        }
+
+        async with self.session.get(accounts_url, params=params, headers=headers) as response:
+            body = await response.text()
+            if response.status >= 400:
+                raise ElectricUsageAPIError(
+                    f"SmartHub accounts failed with HTTP {response.status}: {body[:200]}"
+                )
+            try:
+                return await response.json(content_type=None)
+            except Exception as err:
+                raise ElectricUsageAPIError(
+                    f"SmartHub accounts returned non-JSON response: {body[:200]}"
+                ) from err
+
+    def _accounts_param_sets(self) -> list[dict[str, str]]:
+        """Return SmartHub accounts endpoint parameter combinations to try."""
+        param_sets: list[dict[str, str]] = []
+        user_ids = [self._smarthub_user_id, self.username]
+        for user_id in dict.fromkeys(user_id for user_id in user_ids if user_id):
+            if self._customer_number:
+                param_sets.append({"user": user_id, "customer": self._customer_number})
+            param_sets.append({"user": user_id})
 
         if self._customer_number:
             param_sets.append({"customer": self._customer_number})
