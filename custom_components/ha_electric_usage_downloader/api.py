@@ -42,6 +42,8 @@ class ElectricUsageAPI:
         self.usage_timezone = usage_timezone
         self.extract_days = extract_days
         self._authorization_token: str | None = None
+        self._smarthub_user_id: str | None = None
+        self._customer_number: str | None = None
 
     async def login(self):
         """Log in to SmartHub and retrieve an authorization token."""
@@ -68,6 +70,17 @@ class ElectricUsageAPI:
             raise ElectricUsageAPIError("SmartHub auth response did not include a token")
 
         self._authorization_token = token
+        self._smarthub_user_id = (
+            self._first_string_for_keys(
+                data,
+                ("userId", "username", "userName", "email", "registeredEmail"),
+                max_depth=2,
+            )
+            or self.username
+        )
+        self._customer_number = self._first_string_for_keys(
+            data, ("customerNumber", "customer", "customerId", "custNbr"), max_depth=3
+        )
 
     async def get_usage_data(self):
         """Fetch recent electric usage interval data from SmartHub."""
@@ -119,13 +132,23 @@ class ElectricUsageAPI:
 
     async def _get_user_data(self) -> Any:
         """Fetch SmartHub account metadata used by the portal account picker."""
+        last_payload: Any = None
+        for params in self._user_data_param_sets():
+            payload = await self._request_user_data(params)
+            last_payload = payload
+            if self._payload_has_content(payload):
+                return payload
+
+        return last_payload
+
+    async def _request_user_data(self, params: dict[str, str]) -> Any:
+        """Fetch SmartHub account metadata with one parameter set."""
         user_data_url = f"{self.api_url}/services/secured/user-data"
         headers = {
             **self._base_headers(),
             "authorization": f"Bearer {self._authorization_token}",
             "x-nisc-smarthub-username": self.username,
         }
-        params = {"userId": self.username}
 
         async with self.session.get(
             user_data_url, params=params, headers=headers
@@ -141,6 +164,20 @@ class ElectricUsageAPI:
                 raise ElectricUsageAPIError(
                     f"SmartHub user-data returned non-JSON response: {body[:200]}"
                 ) from err
+
+    def _user_data_param_sets(self) -> list[dict[str, str]]:
+        """Return SmartHub user-data parameter combinations to try."""
+        param_sets: list[dict[str, str]] = []
+        user_ids = [self._smarthub_user_id, self.username]
+        for user_id in dict.fromkeys(user_id for user_id in user_ids if user_id):
+            if self._customer_number:
+                param_sets.append({"userId": user_id, "customer": self._customer_number})
+            param_sets.append({"userId": user_id})
+
+        if self._customer_number:
+            param_sets.append({"customer": self._customer_number})
+        param_sets.append({})
+        return param_sets
 
     async def _poll_usage(self) -> dict[str, Any]:
         """Call SmartHub's usage polling endpoint."""
@@ -623,6 +660,18 @@ class ElectricUsageAPI:
                 "first": self._payload_shape(first, max_depth - 1),
             }
         return type(payload).__name__
+
+    def _payload_has_content(self, payload: Any) -> bool:
+        """Return True when a SmartHub response has non-empty user data."""
+        if payload is None:
+            return False
+        if isinstance(payload, list):
+            return len(payload) > 0
+        if isinstance(payload, dict):
+            return any(self._payload_has_content(value) for value in payload.values())
+        if isinstance(payload, str):
+            return bool(payload.strip())
+        return True
 
     def _parse_usage_records(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Parse SmartHub poll response into interval records."""
