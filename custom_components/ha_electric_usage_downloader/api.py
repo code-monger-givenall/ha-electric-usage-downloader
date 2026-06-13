@@ -104,6 +104,10 @@ class ElectricUsageAPI:
         payload = await self._get_user_data()
         candidates = self._find_usage_candidates(payload)
         if not candidates:
+            _LOGGER.warning(
+                "Could not discover SmartHub account/service location. User-data shape: %s",
+                self._payload_shape(payload),
+            )
             raise ElectricUsageAPIError(
                 "Could not discover SmartHub account/service location from user data"
             )
@@ -181,10 +185,8 @@ class ElectricUsageAPI:
         """Return account/service-location pairs from SmartHub user-data."""
         candidates: list[dict[str, Any]] = []
         for user_data in self._iter_user_data_records(payload):
-            account = self._string_from_value(
-                user_data.get("account")
-                or user_data.get("accountNumber")
-                or user_data.get("acctNbr")
+            account = self._first_string_for_keys(
+                user_data, ("account", "accountNumber", "acctNbr", "accountId")
             )
             if not account:
                 continue
@@ -211,11 +213,40 @@ class ElectricUsageAPI:
         elif isinstance(payload, list):
             for value in payload:
                 if isinstance(value, dict):
-                    if any(
-                        key in value for key in ("account", "accountNumber", "acctNbr")
-                    ):
+                    if self._looks_like_user_data_record(value):
                         yield value
                     yield from self._iter_user_data_records(value)
+
+    def _looks_like_user_data_record(self, value: dict[str, Any]) -> bool:
+        """Return True when a dict resembles a SmartHub user-data account."""
+        return bool(
+            self._first_string_for_keys(
+                value, ("account", "accountNumber", "acctNbr", "accountId"), max_depth=2
+            )
+            and (
+                any(
+                    key in value
+                    for key in (
+                        "primaryServiceLocationId",
+                        "serviceLocationIdToServiceLocationSummary",
+                        "serviceLocationToIndustries",
+                        "serviceLocationToProviders",
+                        "serviceLocationToUserDataServiceLocationSummaries",
+                    )
+                )
+                or self._first_string_for_keys(
+                    value,
+                    (
+                        "serviceLocation",
+                        "serviceLocationNumber",
+                        "serviceLocationId",
+                        "srvLoc",
+                        "srvLocNbr",
+                    ),
+                    max_depth=2,
+                )
+            )
+        )
 
     def _candidates_from_user_data_record(
         self, user_data: dict[str, Any], account: str
@@ -227,40 +258,81 @@ class ElectricUsageAPI:
             "serviceLocationToUserDataServiceLocationSummaries"
         )
 
-        if isinstance(industries_by_location, dict):
-            for service_location, industries in industries_by_location.items():
-                service_location = self._string_from_value(service_location)
-                if service_location:
-                    candidates.append(
-                        {
-                            "account_number": account,
-                            "service_location_number": service_location,
-                            "electric": self._contains_electric(industries),
-                            "active": True,
-                            "source": "serviceLocationToIndustries",
-                        }
-                    )
-
-        if isinstance(summaries_by_location, dict):
-            for service_location, summaries in summaries_by_location.items():
-                service_location = self._string_from_value(service_location)
-                if not service_location:
-                    continue
+        for service_location, industries in self._iter_mapping_entries(
+            industries_by_location
+        ):
+            service_location = self._string_from_value(service_location)
+            if not service_location:
+                service_location = self._first_string_for_keys(
+                    industries,
+                    (
+                        "serviceLocation",
+                        "serviceLocationNumber",
+                        "serviceLocationId",
+                        "srvLoc",
+                        "srvLocNbr",
+                    ),
+                    max_depth=3,
+                )
+            if service_location:
                 candidates.append(
                     {
                         "account_number": account,
                         "service_location_number": service_location,
-                        "electric": self._contains_electric(summaries),
-                        "active": self._contains_active_service(summaries),
-                        "source": "serviceLocationToUserDataServiceLocationSummaries",
+                        "electric": self._contains_electric(industries),
+                        "active": True,
+                        "source": "serviceLocationToIndustries",
                     }
                 )
+
+        for service_location, summaries in self._iter_mapping_entries(
+            summaries_by_location
+        ):
+            service_location = self._string_from_value(service_location)
+            if not service_location:
+                service_location = self._first_string_for_keys(
+                    summaries,
+                    (
+                        "serviceLocation",
+                        "serviceLocationNumber",
+                        "serviceLocationId",
+                        "srvLoc",
+                        "srvLocNbr",
+                    ),
+                    max_depth=4,
+                )
+            if not service_location:
+                continue
+            candidates.append(
+                {
+                    "account_number": account,
+                    "service_location_number": service_location,
+                    "electric": self._contains_electric(summaries),
+                    "active": self._contains_active_service(summaries),
+                    "source": "serviceLocationToUserDataServiceLocationSummaries",
+                }
+            )
 
         direct_service_location = self._string_from_value(
             user_data.get("serviceLocation")
             or user_data.get("serviceLocationNumber")
+            or user_data.get("serviceLocationId")
+            or user_data.get("srvLoc")
+            or user_data.get("srvLocNbr")
             or self._service_location_from_id(user_data.get("primaryServiceLocationId"))
         )
+        if not direct_service_location:
+            direct_service_location = self._first_string_for_keys(
+                user_data,
+                (
+                    "serviceLocation",
+                    "serviceLocationNumber",
+                    "serviceLocationId",
+                    "srvLoc",
+                    "srvLocNbr",
+                ),
+                max_depth=3,
+            )
         if direct_service_location:
             candidates.append(
                 {
@@ -273,28 +345,40 @@ class ElectricUsageAPI:
             )
 
         summaries = user_data.get("serviceLocationIdToServiceLocationSummary")
-        if isinstance(summaries, dict):
-            for service_location, summary in summaries.items():
-                service_location = self._string_from_value(
-                    self._service_location_from_id(
-                        summary.get("id") if isinstance(summary, dict) else None
-                    )
-                    or service_location
+        for service_location, summary in self._iter_mapping_entries(summaries):
+            service_location = self._string_from_value(
+                self._service_location_from_id(
+                    summary.get("id") if isinstance(summary, dict) else None
                 )
-                if service_location:
-                    candidates.append(
-                        {
-                            "account_number": account,
-                            "service_location_number": service_location,
-                            "electric": self._contains_electric(
-                                industries_by_location.get(service_location)
-                                if isinstance(industries_by_location, dict)
-                                else summary
-                            ),
-                            "active": not user_data.get("inactive", False),
-                            "source": "serviceLocationIdToServiceLocationSummary",
-                        }
-                    )
+                or service_location
+            )
+            if not service_location:
+                service_location = self._first_string_for_keys(
+                    summary,
+                    (
+                        "serviceLocation",
+                        "serviceLocationNumber",
+                        "serviceLocationId",
+                        "srvLoc",
+                        "srvLocNbr",
+                    ),
+                    max_depth=3,
+                )
+            if service_location:
+                candidates.append(
+                    {
+                        "account_number": account,
+                        "service_location_number": service_location,
+                        "electric": self._contains_electric(
+                            self._mapping_value_for_key(
+                                industries_by_location, service_location
+                            )
+                            or summary
+                        ),
+                        "active": not user_data.get("inactive", False),
+                        "source": "serviceLocationIdToServiceLocationSummary",
+                    }
+                )
 
         return candidates
 
@@ -302,16 +386,19 @@ class ElectricUsageAPI:
         """Fallback extraction for less common SmartHub JSON shapes."""
         candidates: list[dict[str, Any]] = []
         if isinstance(payload, dict):
-            account = self._string_from_value(
-                payload.get("account")
-                or payload.get("accountNumber")
-                or payload.get("acctNbr")
+            account = self._first_string_for_keys(
+                payload, ("account", "accountNumber", "acctNbr", "accountId"), max_depth=2
             )
-            service_location = self._string_from_value(
-                payload.get("serviceLocation")
-                or payload.get("serviceLocationNumber")
-                or payload.get("srvLoc")
-                or payload.get("srvLocNbr")
+            service_location = self._first_string_for_keys(
+                payload,
+                (
+                    "serviceLocation",
+                    "serviceLocationNumber",
+                    "serviceLocationId",
+                    "srvLoc",
+                    "srvLocNbr",
+                ),
+                max_depth=2,
             )
             if account and service_location:
                 candidates.append(
@@ -381,12 +468,76 @@ class ElectricUsageAPI:
     def _service_location_from_id(self, value: Any) -> str | None:
         """Extract a SmartHub service location string from an id object."""
         if isinstance(value, dict):
-            return self._string_from_value(
+            direct = self._string_from_value(
                 value.get("serviceLocation")
                 or value.get("serviceLocationNumber")
+                or value.get("serviceLocationId")
+                or value.get("srvLoc")
                 or value.get("srvLocNbr")
             )
+            if direct:
+                return direct
+            return self._first_string_for_keys(
+                value,
+                (
+                    "serviceLocation",
+                    "serviceLocationNumber",
+                    "serviceLocationId",
+                    "srvLoc",
+                    "srvLocNbr",
+                ),
+                max_depth=3,
+            )
         return self._string_from_value(value)
+
+    def _iter_mapping_entries(self, value: Any):
+        """Yield key/value pairs from SmartHub map encodings."""
+        if isinstance(value, dict):
+            entries = value.get("entries")
+            if isinstance(entries, list):
+                for entry in entries:
+                    key, child = self._entry_key_value(entry)
+                    yield key, child
+                return
+
+            for key, child in value.items():
+                yield key, child
+            return
+
+        if isinstance(value, list):
+            for entry in value:
+                key, child = self._entry_key_value(entry)
+                yield key, child
+
+    def _entry_key_value(self, entry: Any) -> tuple[Any, Any]:
+        """Return a best-effort key/value pair from a serialized map entry."""
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            return entry[0], entry[1]
+        if isinstance(entry, dict):
+            key = (
+                entry.get("key")
+                or entry.get("name")
+                or entry.get("id")
+                or entry.get("serviceLocation")
+                or entry.get("serviceLocationNumber")
+                or entry.get("srvLocNbr")
+            )
+            child = (
+                entry.get("value")
+                or entry.get("values")
+                or entry.get("items")
+                or entry.get("data")
+                or entry
+            )
+            return key, child
+        return None, entry
+
+    def _mapping_value_for_key(self, mapping: Any, lookup_key: str) -> Any:
+        """Return a map value from any SmartHub map encoding."""
+        for key, value in self._iter_mapping_entries(mapping):
+            if self._string_from_value(key) == lookup_key:
+                return value
+        return None
 
     def _contains_active_service(self, value: Any) -> bool:
         """Return True when summaries include an active electric service."""
@@ -427,6 +578,51 @@ class ElectricUsageAPI:
             value = int(value)
         text = str(value).strip()
         return text or None
+
+    def _first_string_for_keys(
+        self, value: Any, keys: tuple[str, ...], max_depth: int = 4
+    ) -> str | None:
+        """Find the first scalar string for any key within a bounded depth."""
+        if max_depth < 0:
+            return None
+        if isinstance(value, dict):
+            for key in keys:
+                candidate = value.get(key)
+                if not isinstance(candidate, (dict, list)):
+                    text = self._string_from_value(candidate)
+                    if text:
+                        return text
+            for child in value.values():
+                text = self._first_string_for_keys(child, keys, max_depth - 1)
+                if text:
+                    return text
+        elif isinstance(value, list):
+            for child in value:
+                text = self._first_string_for_keys(child, keys, max_depth - 1)
+                if text:
+                    return text
+        return None
+
+    def _payload_shape(self, payload: Any, max_depth: int = 3) -> Any:
+        """Return a sanitized key-only shape summary for debugging."""
+        if max_depth < 0:
+            return type(payload).__name__
+        if isinstance(payload, dict):
+            shape: dict[str, Any] = {}
+            for index, (key, value) in enumerate(payload.items()):
+                if index >= 20:
+                    shape["..."] = f"{len(payload) - 20} more keys"
+                    break
+                shape[key] = self._payload_shape(value, max_depth - 1)
+            return shape
+        if isinstance(payload, list):
+            first = payload[0] if payload else None
+            return {
+                "type": "list",
+                "len": len(payload),
+                "first": self._payload_shape(first, max_depth - 1),
+            }
+        return type(payload).__name__
 
     def _parse_usage_records(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Parse SmartHub poll response into interval records."""
