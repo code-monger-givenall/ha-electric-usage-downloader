@@ -17,15 +17,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the Electric Usage Downloader from a config entry."""
     username = entry.data["username"]
     password = entry.data["password"]
-    api_url = entry.data.get("api_url") or _origin_from_url(
+    api_url = entry.options.get("api_url") or entry.data.get("api_url") or _origin_from_url(
         entry.data.get("login_url"), DEFAULT_API_URL
     )
-    account_number = entry.data.get("account_number") or entry.data.get("account")
-    service_location_number = entry.data.get("service_location_number") or entry.data.get(
-        "service_location"
+    account_number = (
+        entry.options.get("account_number")
+        or entry.data.get("account_number")
+        or entry.data.get("account")
     )
-    usage_timezone = entry.data.get("timezone") or hass.config.time_zone
-    extract_days = int(entry.data.get("extract_days", 7))
+    service_location_number = (
+        entry.options.get("service_location_number")
+        or entry.data.get("service_location_number")
+        or entry.data.get("service_location")
+    )
+    usage_timezone = (
+        entry.options.get("timezone") or entry.data.get("timezone") or hass.config.time_zone
+    )
+    extract_days = int(entry.options.get("extract_days", entry.data.get("extract_days", 7)))
 
     session = async_get_clientsession(hass)
     api = ElectricUsageAPI(
