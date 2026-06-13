@@ -3,7 +3,7 @@
   "name": "Electric Usage Downloader",
   "version": "1.0.0",
   "documentation": "https://github.com/smue86/ha-electric-usage-downloader",
-  "requirements": ["beautifulsoup4>=4.12.0"],
+  "requirements": [],
   "dependencies": [],
   "codeowners": ["@smue86"],
   "iot_class": "cloud_polling",

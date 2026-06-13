@@ -2,6 +2,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -10,31 +11,48 @@ from .api import ElectricUsageAPI
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
+DEFAULT_API_URL = "https://pec.smarthub.coop"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the Electric Usage Downloader from a config entry."""
-    try:
-        username = entry.data["username"]
-        password = entry.data["password"]
-        login_url = entry.data["login_url"]
-        usage_url = entry.data["usage_url"]
+    username = entry.data["username"]
+    password = entry.data["password"]
+    api_url = entry.data.get("api_url") or _origin_from_url(
+        entry.data.get("login_url"), DEFAULT_API_URL
+    )
+    account_number = entry.data.get("account_number") or entry.data.get("account")
+    service_location_number = entry.data.get("service_location_number") or entry.data.get(
+        "service_location"
+    )
+    usage_timezone = entry.data.get("timezone") or hass.config.time_zone
+    extract_days = int(entry.data.get("extract_days", 7))
 
-        session = async_get_clientsession(hass)
-        api = ElectricUsageAPI(session, username, password, login_url, usage_url)
+    if not account_number or not service_location_number:
+        raise ConfigEntryError(
+            "Account number and service location number are required for SmartHub API polling"
+        )
 
-        coordinator = ElectricUsageCoordinator(hass, api)
-        await coordinator.async_refresh()  # Fetch initial data
+    session = async_get_clientsession(hass)
+    api = ElectricUsageAPI(
+        session,
+        username,
+        password,
+        api_url,
+        account_number,
+        service_location_number,
+        usage_timezone,
+        extract_days,
+    )
 
-        hass.data.setdefault(DOMAIN, {})
-        hass.data[DOMAIN][entry.entry_id] = coordinator
+    coordinator = ElectricUsageCoordinator(hass, api)
+    await coordinator.async_config_entry_first_refresh()
 
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        return True
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    except Exception:
-        _LOGGER.exception("Failed to set up entry")
-        return False
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the Electric Usage Downloader."""
@@ -62,9 +80,16 @@ class ElectricUsageCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         """Fetch data from the API."""
-        try:
-            await self.api.login()
-            return await self.api.get_usage_data()
-        except Exception:
-            _LOGGER.exception("Error fetching data from API")
-            return None
+        return await self.api.get_usage_data()
+
+
+def _origin_from_url(url: str | None, default: str) -> str:
+    """Return the origin from a URL string."""
+    if not url:
+        return default
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return default
+    return f"{parsed.scheme}://{parsed.netloc}"

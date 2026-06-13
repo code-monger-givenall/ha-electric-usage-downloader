@@ -1,14 +1,16 @@
 # HA Electric Usage Downloader
 
-The **HA Electric Usage Downloader** integration allows you to download and display your electric usage data from the PEC SmartHub portal directly in Home Assistant. This integration polls the SmartHub API every 15 minutes to provide real-time data about your electricity consumption.
+The **HA Electric Usage Downloader** integration allows you to download and display your electric usage data from the PEC SmartHub portal directly in Home Assistant. This integration polls the SmartHub API every 15 minutes to provide interval data about your electricity consumption.
 
 ## Features
-- **Electric Usage Data**: Automatically fetches your electric usage from the PEC SmartHub portal every 15 minutes.
-- **Configurable URLs**: Allows you to configure the login and usage URLs for flexibility with different SmartHub instances.
-- **Easy Integration**: Once set up, your electric usage data is displayed as a sensor in Home Assistant.
+- **Electric Usage Data**: Automatically fetches your electric usage from the PEC SmartHub API every 15 minutes.
+- **Energy Dashboard Metadata**: Exposes a kWh sensor with energy device class and total-increasing state class.
+- **Configurable SmartHub API Details**: Allows you to configure the SmartHub API URL, account number, service location number, and timezone.
 
 ## Requirements
 - PEC SmartHub account credentials (username and password).
+- PEC SmartHub account number.
+- SmartHub service location number. You can find this in your browser network tools by opening SmartHub Usage Explorer and looking at the `services/secured/utility-usage/poll` request payload.
 - Home Assistant (version 2023.1.0 or higher).
 
 ---
@@ -44,17 +46,17 @@ After installation, you can configure the integration through the Home Assistant
 1. Go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for `HA Electric Usage Downloader` and select it.
 3. Enter your **username** and **password** for the PEC SmartHub portal.
-4. Input the **login URL** and **usage URL** for your SmartHub provider.
-- Default PEC URLs:
-  - Login URL: `https://pec.smarthub.coop/Login.html`
-  - Usage URL: `https://pec.smarthub.coop/Usage/Usage.htm`
+4. Input the **API URL**, **account number**, **service location number**, and **timezone** for your SmartHub provider.
+- Default PEC values:
+  - API URL: `https://pec.smarthub.coop`
+  - Timezone: `America/Chicago`
 5. Complete the configuration, and a new sensor entity will be created with your electric usage data.
 
 ---
 
 ## Usage
 
-Once the integration is configured, you will have a sensor in Home Assistant that displays your current electric usage in kWh. This data will be updated every 15 minutes.
+Once the integration is configured, you will have a sensor in Home Assistant that displays cumulative electric usage in kWh. This data will be updated every 15 minutes.
 
 You can view this sensor in your Home Assistant dashboard or use it in automations, scripts, or notifications to track your energy consumption.
 
@@ -63,7 +65,7 @@ You can view this sensor in your Home Assistant dashboard or use it in automatio
 ## Troubleshooting
 
 If you encounter issues:
-- **Verify URLs**: Ensure that you have entered the correct login and usage URLs for your provider.
+- **Verify API details**: Ensure that you have entered the correct API URL, account number, service location number, and timezone for your provider.
 - **Check Logs**: Look at the Home Assistant logs (under **Settings** > **System** > **Logs**) for any error messages related to the integration.
 - **Authentication Errors**: If login fails, ensure your credentials are correct for the PEC SmartHub portal.
 
@@ -71,11 +73,7 @@ If you encounter issues:
 
 ## Dependencies
 
-This integration requires the following Python libraries:
-- `beautifulsoup4`
-- `aiohttp`
-
-These are automatically installed when you install the integration.
+This integration uses Home Assistant's built-in HTTP client and does not install additional Python requirements.
 
 ---
 
@@ -83,7 +81,7 @@ These are automatically installed when you install the integration.
 
 **1. What if my SmartHub provider uses a different URL?**
 
-You can enter the correct URLs for your provider during setup. The integration is flexible and works with any SmartHub instance that follows the same login and usage structure.
+You can enter the correct API URL for your provider during setup. The integration is flexible and works with SmartHub instances that support the same `services/oauth/auth/v2` and `services/secured/utility-usage/poll` API endpoints.
 
 **2. How often does the integration fetch data?**
 
