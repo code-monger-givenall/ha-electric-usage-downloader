@@ -27,8 +27,8 @@ class ElectricUsageAPI:
         username: str,
         password: str,
         api_url: str,
-        account_number: str,
-        service_location_number: str,
+        account_number: str | None,
+        service_location_number: str | None,
         usage_timezone: str,
         extract_days: int,
     ):
@@ -37,8 +37,8 @@ class ElectricUsageAPI:
         self.username = username
         self.password = password
         self.api_url = api_url.rstrip("/")
-        self.account_number = account_number
-        self.service_location_number = service_location_number
+        self.account_number = self._string_from_value(account_number)
+        self.service_location_number = self._string_from_value(service_location_number)
         self.usage_timezone = usage_timezone
         self.extract_days = extract_days
         self._authorization_token: str | None = None
@@ -76,6 +76,7 @@ class ElectricUsageAPI:
 
         for attempt in range(10):
             try:
+                await self._ensure_usage_identifiers()
                 payload = await self._poll_usage()
                 records = self._parse_usage_records(payload)
                 return {
@@ -95,8 +96,53 @@ class ElectricUsageAPI:
 
         raise ElectricUsageAPIError("SmartHub usage data was not ready")
 
+    async def _ensure_usage_identifiers(self) -> None:
+        """Discover SmartHub account and service location if the user omitted them."""
+        if self.account_number and self.service_location_number:
+            return
+
+        payload = await self._get_user_data()
+        candidates = self._find_usage_candidates(payload)
+        if not candidates:
+            raise ElectricUsageAPIError(
+                "Could not discover SmartHub account/service location from user data"
+            )
+
+        candidate = self._best_usage_candidate(candidates)
+        self.account_number = candidate["account_number"]
+        self.service_location_number = candidate["service_location_number"]
+        _LOGGER.info("Discovered SmartHub usage account and service location")
+
+    async def _get_user_data(self) -> Any:
+        """Fetch SmartHub account metadata used by the portal account picker."""
+        user_data_url = f"{self.api_url}/services/secured/user-data"
+        headers = {
+            **self._base_headers(),
+            "authorization": f"Bearer {self._authorization_token}",
+            "x-nisc-smarthub-username": self.username,
+        }
+        params = {"userId": self.username}
+
+        async with self.session.get(
+            user_data_url, params=params, headers=headers
+        ) as response:
+            body = await response.text()
+            if response.status >= 400:
+                raise ElectricUsageAPIError(
+                    f"SmartHub user-data failed with HTTP {response.status}: {body[:200]}"
+                )
+            try:
+                return await response.json(content_type=None)
+            except Exception as err:
+                raise ElectricUsageAPIError(
+                    f"SmartHub user-data returned non-JSON response: {body[:200]}"
+                ) from err
+
     async def _poll_usage(self) -> dict[str, Any]:
         """Call SmartHub's usage polling endpoint."""
+        if not self.account_number or not self.service_location_number:
+            raise ElectricUsageAPIError("SmartHub account/service location is missing")
+
         usage_url = f"{self.api_url}/services/secured/utility-usage/poll"
         now = datetime.now(ZoneInfo(self.usage_timezone))
         start = now - timedelta(days=max(2, min(self.extract_days, 45)))
@@ -130,6 +176,257 @@ class ElectricUsageAPI:
                 raise ElectricUsageAPIError(
                     f"SmartHub usage poll returned non-JSON response: {body[:200]}"
                 ) from err
+
+    def _find_usage_candidates(self, payload: Any) -> list[dict[str, Any]]:
+        """Return account/service-location pairs from SmartHub user-data."""
+        candidates: list[dict[str, Any]] = []
+        for user_data in self._iter_user_data_records(payload):
+            account = self._string_from_value(
+                user_data.get("account")
+                or user_data.get("accountNumber")
+                or user_data.get("acctNbr")
+            )
+            if not account:
+                continue
+
+            candidates.extend(self._candidates_from_user_data_record(user_data, account))
+
+        candidates.extend(self._generic_usage_candidates(payload))
+        return self._dedupe_candidates(candidates)
+
+    def _iter_user_data_records(self, payload: Any):
+        """Yield SmartHub user-data account records from common response shapes."""
+        if isinstance(payload, dict):
+            user_data = payload.get("userData")
+            if isinstance(user_data, list):
+                for record in user_data:
+                    if isinstance(record, dict):
+                        yield record
+            elif isinstance(user_data, dict):
+                yield user_data
+
+            for value in payload.values():
+                if isinstance(value, (dict, list)):
+                    yield from self._iter_user_data_records(value)
+        elif isinstance(payload, list):
+            for value in payload:
+                if isinstance(value, dict):
+                    if any(
+                        key in value for key in ("account", "accountNumber", "acctNbr")
+                    ):
+                        yield value
+                    yield from self._iter_user_data_records(value)
+
+    def _candidates_from_user_data_record(
+        self, user_data: dict[str, Any], account: str
+    ) -> list[dict[str, Any]]:
+        """Extract service locations from a single SmartHub account record."""
+        candidates: list[dict[str, Any]] = []
+        industries_by_location = user_data.get("serviceLocationToIndustries")
+        summaries_by_location = user_data.get(
+            "serviceLocationToUserDataServiceLocationSummaries"
+        )
+
+        if isinstance(industries_by_location, dict):
+            for service_location, industries in industries_by_location.items():
+                service_location = self._string_from_value(service_location)
+                if service_location:
+                    candidates.append(
+                        {
+                            "account_number": account,
+                            "service_location_number": service_location,
+                            "electric": self._contains_electric(industries),
+                            "active": True,
+                            "source": "serviceLocationToIndustries",
+                        }
+                    )
+
+        if isinstance(summaries_by_location, dict):
+            for service_location, summaries in summaries_by_location.items():
+                service_location = self._string_from_value(service_location)
+                if not service_location:
+                    continue
+                candidates.append(
+                    {
+                        "account_number": account,
+                        "service_location_number": service_location,
+                        "electric": self._contains_electric(summaries),
+                        "active": self._contains_active_service(summaries),
+                        "source": "serviceLocationToUserDataServiceLocationSummaries",
+                    }
+                )
+
+        direct_service_location = self._string_from_value(
+            user_data.get("serviceLocation")
+            or user_data.get("serviceLocationNumber")
+            or self._service_location_from_id(user_data.get("primaryServiceLocationId"))
+        )
+        if direct_service_location:
+            candidates.append(
+                {
+                    "account_number": account,
+                    "service_location_number": direct_service_location,
+                    "electric": self._contains_electric(user_data),
+                    "active": not user_data.get("inactive", False),
+                    "source": "direct",
+                }
+            )
+
+        summaries = user_data.get("serviceLocationIdToServiceLocationSummary")
+        if isinstance(summaries, dict):
+            for service_location, summary in summaries.items():
+                service_location = self._string_from_value(
+                    self._service_location_from_id(
+                        summary.get("id") if isinstance(summary, dict) else None
+                    )
+                    or service_location
+                )
+                if service_location:
+                    candidates.append(
+                        {
+                            "account_number": account,
+                            "service_location_number": service_location,
+                            "electric": self._contains_electric(
+                                industries_by_location.get(service_location)
+                                if isinstance(industries_by_location, dict)
+                                else summary
+                            ),
+                            "active": not user_data.get("inactive", False),
+                            "source": "serviceLocationIdToServiceLocationSummary",
+                        }
+                    )
+
+        return candidates
+
+    def _generic_usage_candidates(self, payload: Any) -> list[dict[str, Any]]:
+        """Fallback extraction for less common SmartHub JSON shapes."""
+        candidates: list[dict[str, Any]] = []
+        if isinstance(payload, dict):
+            account = self._string_from_value(
+                payload.get("account")
+                or payload.get("accountNumber")
+                or payload.get("acctNbr")
+            )
+            service_location = self._string_from_value(
+                payload.get("serviceLocation")
+                or payload.get("serviceLocationNumber")
+                or payload.get("srvLoc")
+                or payload.get("srvLocNbr")
+            )
+            if account and service_location:
+                candidates.append(
+                    {
+                        "account_number": account,
+                        "service_location_number": service_location,
+                        "electric": self._contains_electric(payload),
+                        "active": not payload.get("inactive", False),
+                        "source": "generic",
+                    }
+                )
+
+            for value in payload.values():
+                candidates.extend(self._generic_usage_candidates(value))
+        elif isinstance(payload, list):
+            for value in payload:
+                candidates.extend(self._generic_usage_candidates(value))
+
+        return candidates
+
+    def _best_usage_candidate(self, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Choose the most likely electric service location."""
+        candidates = [
+            candidate
+            for candidate in candidates
+            if (
+                not self.account_number
+                or candidate["account_number"] == self.account_number
+            )
+            and (
+                not self.service_location_number
+                or candidate["service_location_number"] == self.service_location_number
+            )
+        ] or candidates
+
+        return max(candidates, key=self._candidate_score)
+
+    def _candidate_score(self, candidate: dict[str, Any]) -> tuple[int, int, int]:
+        """Score discovered candidates without logging account details."""
+        return (
+            1 if candidate.get("electric") else 0,
+            1 if candidate.get("active") else 0,
+            1 if candidate.get("source") == "serviceLocationToIndustries" else 0,
+        )
+
+    def _dedupe_candidates(
+        self, candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Merge duplicate account/service-location candidates."""
+        deduped: dict[tuple[str, str], dict[str, Any]] = {}
+        for candidate in candidates:
+            account = candidate.get("account_number")
+            service_location = candidate.get("service_location_number")
+            if not account or not service_location:
+                continue
+
+            key = (account, service_location)
+            existing = deduped.get(key)
+            if existing:
+                existing["electric"] = existing.get("electric") or candidate.get("electric")
+                existing["active"] = existing.get("active") or candidate.get("active")
+            else:
+                deduped[key] = candidate
+
+        return list(deduped.values())
+
+    def _service_location_from_id(self, value: Any) -> str | None:
+        """Extract a SmartHub service location string from an id object."""
+        if isinstance(value, dict):
+            return self._string_from_value(
+                value.get("serviceLocation")
+                or value.get("serviceLocationNumber")
+                or value.get("srvLocNbr")
+            )
+        return self._string_from_value(value)
+
+    def _contains_active_service(self, value: Any) -> bool:
+        """Return True when summaries include an active electric service."""
+        statuses: list[str] = []
+
+        def collect_statuses(item: Any) -> None:
+            if isinstance(item, dict):
+                status = item.get("serviceStatus")
+                if status:
+                    statuses.append(str(status).upper())
+                for child in item.values():
+                    collect_statuses(child)
+            elif isinstance(item, list):
+                for child in item:
+                    collect_statuses(child)
+
+        collect_statuses(value)
+        return not statuses or any(
+            status in {"ACTIVE", "PENDING_DISCONNECT"} for status in statuses
+        )
+
+    def _contains_electric(self, value: Any) -> bool:
+        """Return True if nested SmartHub data references electric service."""
+        if isinstance(value, dict):
+            return any(self._contains_electric(child) for child in value.values())
+        if isinstance(value, list):
+            return any(self._contains_electric(child) for child in value)
+        if value is None:
+            return False
+        text = str(value).upper()
+        return "ELECTRIC" in text or text in {"EL", "E"}
+
+    def _string_from_value(self, value: Any) -> str | None:
+        """Convert common SmartHub scalar values into clean strings."""
+        if value is None:
+            return None
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        text = str(value).strip()
+        return text or None
 
     def _parse_usage_records(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Parse SmartHub poll response into interval records."""

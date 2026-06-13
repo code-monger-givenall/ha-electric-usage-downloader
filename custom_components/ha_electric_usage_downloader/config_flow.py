@@ -22,18 +22,18 @@ class ElectricUsageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             # Ensure username and password are not empty
             try:
-                if not user_input.get("username") or not user_input.get("password"):
+                data = {
+                    key: value.strip() if isinstance(value, str) else value
+                    for key, value in user_input.items()
+                    if value not in (None, "")
+                }
+                if not data.get("username") or not data.get("password"):
                     errors["base"] = "missing_credentials"
                     _LOGGER.error("Missing credentials.")
-                elif not user_input.get("account_number") or not user_input.get(
-                    "service_location_number"
-                ):
-                    errors["base"] = "missing_account_details"
-                    _LOGGER.error("Missing account details.")
                 else:
                     # If no errors, create the config entry
                     return self.async_create_entry(
-                        title="Electric Usage Downloader", data=user_input
+                        title="Electric Usage Downloader", data=data
                     )
             except Exception as e:
                 _LOGGER.error(f"Error during config flow: {e}")
@@ -45,8 +45,8 @@ class ElectricUsageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required("username"): str,
                 vol.Required("password"): str,
                 vol.Required("api_url", default=DEFAULT_API_URL): str,
-                vol.Required("account_number"): str,
-                vol.Required("service_location_number"): str,
+                vol.Optional("account_number"): str,
+                vol.Optional("service_location_number"): str,
                 vol.Required("timezone", default=DEFAULT_TIMEZONE): str,
                 vol.Optional("extract_days", default=7): vol.All(
                     vol.Coerce(int), vol.Range(min=2, max=45)

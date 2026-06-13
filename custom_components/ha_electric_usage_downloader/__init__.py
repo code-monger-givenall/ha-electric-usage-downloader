@@ -2,7 +2,6 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -28,11 +27,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     usage_timezone = entry.data.get("timezone") or hass.config.time_zone
     extract_days = int(entry.data.get("extract_days", 7))
 
-    if not account_number or not service_location_number:
-        raise ConfigEntryError(
-            "Account number and service location number are required for SmartHub API polling"
-        )
-
     session = async_get_clientsession(hass)
     api = ElectricUsageAPI(
         session,
@@ -47,6 +41,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = ElectricUsageCoordinator(hass, api)
     await coordinator.async_config_entry_first_refresh()
+    if (
+        api.account_number
+        and api.service_location_number
+        and (
+            entry.data.get("account_number") != api.account_number
+            or entry.data.get("service_location_number") != api.service_location_number
+        )
+    ):
+        hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                "account_number": api.account_number,
+                "service_location_number": api.service_location_number,
+            },
+            version=2,
+        )
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator

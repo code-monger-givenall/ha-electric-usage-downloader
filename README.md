@@ -5,12 +5,11 @@ The **HA Electric Usage Downloader** integration allows you to download and disp
 ## Features
 - **Electric Usage Data**: Automatically fetches your electric usage from the PEC SmartHub API every 15 minutes.
 - **Energy Dashboard Metadata**: Exposes a kWh sensor with energy device class and total-increasing state class.
-- **Configurable SmartHub API Details**: Allows you to configure the SmartHub API URL, account number, service location number, and timezone.
+- **Configurable SmartHub API Details**: Allows you to configure the SmartHub API URL and timezone, with optional account number and service location overrides.
 
 ## Requirements
 - PEC SmartHub account credentials (username and password).
-- PEC SmartHub account number.
-- SmartHub service location number. You can find this in your browser network tools by opening SmartHub Usage Explorer and looking at the `services/secured/utility-usage/poll` request payload.
+- PEC SmartHub account number and service location number are discovered automatically when SmartHub exposes them through user data. If discovery fails, enter them manually.
 - Home Assistant (version 2023.1.0 or higher).
 
 ---
@@ -46,7 +45,7 @@ After installation, you can configure the integration through the Home Assistant
 1. Go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for `HA Electric Usage Downloader` and select it.
 3. Enter your **username** and **password** for the PEC SmartHub portal.
-4. Input the **API URL**, **account number**, **service location number**, and **timezone** for your SmartHub provider.
+4. Input the **API URL** and **timezone** for your SmartHub provider. Leave account number and service location number blank unless automatic discovery fails or you want to force a specific meter/location.
 - Default PEC values:
   - API URL: `https://pec.smarthub.coop`
   - Timezone: `America/Chicago`
