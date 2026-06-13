@@ -54,6 +54,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate older config entries."""
+    if entry.version == 1:
+        data = {**entry.data}
+        if "api_url" not in data:
+            data["api_url"] = _origin_from_url(data.get("login_url"), DEFAULT_API_URL)
+        if "timezone" not in data:
+            data["timezone"] = hass.config.time_zone
+        if "extract_days" not in data:
+            data["extract_days"] = 7
+        hass.config_entries.async_update_entry(entry, data=data, version=2)
+
+    return True
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the Electric Usage Downloader."""
     try:
