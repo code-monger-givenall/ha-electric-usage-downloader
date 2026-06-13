@@ -87,10 +87,12 @@ class ElectricUsageAPI:
         if not self._authorization_token:
             await self.login()
 
+        now = datetime.now(ZoneInfo(self.usage_timezone))
+        start = now - timedelta(days=max(2, min(self.extract_days, 45)))
         for attempt in range(10):
             try:
                 await self._ensure_usage_identifiers()
-                payload = await self._poll_usage()
+                payload = await self._poll_usage(start, now)
                 records = self._parse_usage_records(payload)
                 return {
                     "records": records,
@@ -241,14 +243,12 @@ class ElectricUsageAPI:
         param_sets.append({})
         return param_sets
 
-    async def _poll_usage(self) -> dict[str, Any]:
+    async def _poll_usage(self, start: datetime, end: datetime) -> dict[str, Any]:
         """Call SmartHub's usage polling endpoint."""
         if not self.account_number or not self.service_location_number:
             raise ElectricUsageAPIError("SmartHub account/service location is missing")
 
         usage_url = f"{self.api_url}/services/secured/utility-usage/poll"
-        now = datetime.now(ZoneInfo(self.usage_timezone))
-        start = now - timedelta(days=max(2, min(self.extract_days, 45)))
         payload = {
             "timeFrame": "HOURLY",
             "userId": self.username,
@@ -258,7 +258,7 @@ class ElectricUsageAPI:
             "accountNumber": self.account_number,
             "industries": ["ELECTRIC"],
             "startDateTime": int(start.timestamp() * 1000),
-            "endDateTime": int(now.timestamp() * 1000),
+            "endDateTime": int(end.timestamp() * 1000),
         }
         headers = {
             **self._base_headers(),
