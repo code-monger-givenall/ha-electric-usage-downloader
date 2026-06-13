@@ -68,7 +68,7 @@ class ElectricUsageOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, config_entry):
         """Initialize the options flow."""
-        self.config_entry = config_entry
+        self._config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Manage integration options."""
@@ -108,6 +108,6 @@ class ElectricUsageOptionsFlow(config_entries.OptionsFlow):
 
     def _option_or_data(self, key, default):
         """Return an option value, falling back to config entry data."""
-        return self.config_entry.options.get(
-            key, self.config_entry.data.get(key, default)
+        return self._config_entry.options.get(
+            key, self._config_entry.data.get(key, default)
         )
